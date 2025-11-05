@@ -489,60 +489,43 @@
             const metabolismTimeHours = (soberBy - sessionEnd) / (1000 * 60 * 60);
             
             /*
-             * SCIENTIFIC CALCULATION - Working backwards from sober time
+             * SCIENTIFIC CALCULATION - Proper BAC modeling
              * 
-             * We need to find the maximum number of drinks such that:
-             * 1. All drinks are consumed during the session (between start and end)
-             * 2. BAC reaches exactly 0% at the sober-by time (including upper error margin)
+             * Key insight: BAC peaks at session END (when drinking stops)
+             * Then it metabolizes down to 0 by the sober time.
              * 
-             * The critical insight: The LAST drink consumed will take the longest to metabolize.
-             * If we drink at sessionEnd, we need metabolismTimeHours to fully metabolize.
+             * Physics:
+             * 1. During session: Adding alcohol AND metabolizing simultaneously
+             * 2. Peak BAC = (total alcohol added) - (metabolism during session)
+             * 3. This peak BAC must metabolize to 0 by sober time
              * 
-             * For worst-case (upper error margin = 20% slower metabolism):
-             * - Effective metabolism rate = 0.015 / 1.2 = 0.0125% per hour
+             * Formula:
+             * Peak BAC = Σ(BAC_per_drink) - (session_hours × metabolism_rate)
+             * Peak BAC must equal: metabolism_time_after_session × metabolism_rate
              * 
-             * Algorithm:
-             * 1. Calculate BAC per drink: BAC_per_drink = (grams / (weight_kg * 1000 * r)) * 100
-             * 2. Find max drinks where last drink at sessionEnd reaches 0 BAC by soberBy
-             * 3. Each drink contributes to total BAC, but older drinks have more time to metabolize
+             * For safety (20% slower worst case):
+             * metabolism_rate_worst = 0.015 / 1.2 = 0.0125% per hour
              */
             
-            // BAC per drink (peak BAC immediately after consumption)
+            // BAC per drink (immediate BAC contribution)
             const bacPerDrink = (drink.gramsPerServing / (weight * 1000 * widmarkR)) * 100;
             
             // Worst case metabolism rate (20% slower for upper error bound)
             const worstCaseMetabolismRate = metabolismRate / 1.2;
             
-            // Binary search for maximum drinks
-            let maxDrinks = 0;
+            // Maximum peak BAC we can have at session end
+            // This must metabolize to zero by sober time
+            const maxPeakBAC = metabolismTimeHours * worstCaseMetabolismRate;
             
-            // Try different numbers of drinks and simulate BAC at sober time
-            for (let numDrinks = 1; numDrinks <= 50; numDrinks++) {
-                // Simulate evenly spaced drinking (steady pace)
-                let bacAtSoberTime = 0;
-                
-                for (let i = 0; i < numDrinks; i++) {
-                    // When is this drink consumed?
-                    const drinkTime = sessionStart.getTime() + (i * (sessionEnd - sessionStart) / numDrinks);
-                    const drinkTimeDate = new Date(drinkTime);
-                    
-                    // How much time to metabolize from drink time to sober time?
-                    const hoursToMetabolize = (soberBy - drinkTimeDate) / (1000 * 60 * 60);
-                    
-                    // BAC from this drink at sober time (worst case)
-                    const remainingBAC = Math.max(0, bacPerDrink - (hoursToMetabolize * worstCaseMetabolismRate));
-                    
-                    bacAtSoberTime += remainingBAC;
-                }
-                
-                // If we're still sober (BAC ~= 0) at the target time, this is safe
-                if (bacAtSoberTime < 0.001) { // Effectively zero
-                    maxDrinks = numDrinks;
-                } else {
-                    // We've exceeded safe limits
-                    break;
-                }
-            }
+            // During the session, we both add and remove alcohol
+            // Net BAC at end = (drinks × bacPerDrink) - (session_hours × metabolism_rate)
+            // We want: Net BAC at end = maxPeakBAC
+            // So: (drinks × bacPerDrink) - (session_hours × worstCaseMetabolismRate) = maxPeakBAC
+            // Therefore: drinks = (maxPeakBAC + (session_hours × worstCaseMetabolismRate)) / bacPerDrink
+            
+            const maxDrinks = Math.floor(
+                (maxPeakBAC + (sessionDurationHours * worstCaseMetabolismRate)) / bacPerDrink
+            );
             
             // Store calculation data
             chartData = {
@@ -602,40 +585,39 @@
                     • A = grams of pure alcohol consumed<br>
                     • W = body weight in grams (you: ${weight * 1000}g)<br>
                     • r = body water distribution ratio (you: ${chartData.widmarkR})<br>
-                    • Each ${chartData.drink.name} = ${chartData.drink.gramsPerServing.toFixed(1)}g alcohol
+                    • Each ${chartData.drink.name} = ${chartData.drink.gramsPerServing.toFixed(1)}g alcohol = ${chartData.bacPerDrink.toFixed(4)}% BAC
                 </p>
                 <p style="margin-bottom: 15px;">
                     <strong>⏱️ Metabolism Rate:</strong> Alcohol is metabolized at approximately ${chartData.metabolismRate * 100}% BAC per hour 
-                    via hepatic alcohol dehydrogenase. This is relatively constant and cannot be accelerated by coffee, cold showers, or exercise. 
-                    One standard drink (~10g alcohol) takes about 1 hour to metabolize.
+                    via hepatic alcohol dehydrogenase (zero-order kinetics). This is relatively constant and cannot be accelerated. 
+                    For safety, we use worst-case ${(chartData.worstCaseMetabolismRate * 100).toFixed(3)}% per hour (20% slower).
                 </p>
                 <p style="margin-bottom: 15px;">
-                    <strong>🔬 Calculation Method:</strong> This tool works <em>backwards</em> from your sober time. 
-                    For each drink consumed at time T, we calculate when it will be fully metabolized. The constraint is that 
-                    ALL drinks must be metabolized by your target time. We account for the worst-case scenario (20% slower metabolism) 
-                    to ensure safety even with individual variation.
+                    <strong>🔬 Peak BAC Calculation:</strong> Your BAC <em>peaks at session end</em> when you stop drinking. 
+                    During your ${chartData.sessionDurationHours.toFixed(1)}h session, you're simultaneously adding alcohol AND metabolizing it. 
+                    Net peak BAC = (total drinks × ${chartData.bacPerDrink.toFixed(4)}%) - (${chartData.sessionDurationHours.toFixed(1)}h × ${(chartData.worstCaseMetabolismRate * 100).toFixed(3)}%/h) 
+                    = ${((chartData.maxDrinks * chartData.bacPerDrink) - (chartData.sessionDurationHours * chartData.worstCaseMetabolismRate)).toFixed(4)}% peak BAC.
                 </p>
                 <p style="margin-bottom: 15px;">
-                    <strong>📊 Per Drink BAC:</strong> Each ${chartData.drink.name} produces approximately ${chartData.bacPerDrink.toFixed(4)}% BAC 
-                    in your body (peak level). This takes ${(chartData.bacPerDrink / chartData.metabolismRate).toFixed(1)} hours to fully metabolize 
-                    (${(chartData.bacPerDrink / chartData.worstCaseMetabolismRate).toFixed(1)} hours worst-case).
+                    <strong>📉 Metabolism to Zero:</strong> After session end, you have ${chartData.metabolismTimeHours.toFixed(1)} hours of pure elimination. 
+                    Maximum safe peak BAC = ${chartData.metabolismTimeHours.toFixed(1)}h × ${(chartData.worstCaseMetabolismRate * 100).toFixed(3)}%/h = ${(chartData.metabolismTimeHours * chartData.worstCaseMetabolismRate).toFixed(4)}% BAC. 
+                    This ensures you reach 0.000% by your deadline.
                 </p>
                 <p style="margin-bottom: 15px;">
-                    <strong>⚡ Key Variables:</strong>
-                    • Session duration: ${chartData.sessionDurationHours.toFixed(2)} hours<br>
-                    • Recovery time: ${chartData.metabolismTimeHours.toFixed(2)} hours<br>
-                    • Total time: ${chartData.totalTimeToSober.toFixed(2)} hours<br>
-                    • Max safe drinks: ${chartData.maxDrinks} × ${chartData.drink.name}s
+                    <strong>🎯 Why Timing Matters:</strong> Frontloading (heavy start) means more drinks metabolize DURING the session, 
+                    lowering your peak BAC at session end. Backloading (slow start) means less time to metabolize during drinking, 
+                    creating a higher peak that takes longer to eliminate. The steady pace balances both phases.
                 </p>
                 <p style="margin-bottom: 15px;">
-                    <strong>🎯 Why Different Patterns Matter:</strong> The timing of consumption dramatically affects metabolism. 
-                    Drinks consumed early have more time to metabolize. Frontloading (heavy start) means your last drinks have maximum 
-                    metabolism time. Backloading (slow start) means your final drinks have minimal time to clear before your deadline.
+                    <strong>📊 The Math:</strong> 
+                    Max drinks = (Peak BAC limit + Session metabolism) / BAC per drink<br>
+                    = (${(chartData.metabolismTimeHours * chartData.worstCaseMetabolismRate).toFixed(4)}% + ${(chartData.sessionDurationHours * chartData.worstCaseMetabolismRate).toFixed(4)}%) / ${chartData.bacPerDrink.toFixed(4)}%<br>
+                    = ${chartData.maxDrinks} drinks
                 </p>
                 <p>
-                    <strong>⚠️ Real-World Factors:</strong> Food (especially fats/proteins) slows absorption by 30-50%. 
-                    Hydration, medications, liver health, and genetics all affect metabolism. Asian populations often have 
-                    less efficient aldehyde dehydrogenase (ALDH2 deficiency). This calculator assumes optimal conditions!
+                    <strong>⚠️ Real-World Factors:</strong> Food slows absorption (30-90 min delay), reducing peak BAC by 30-50%. 
+                    Hydration dilutes but doesn't eliminate alcohol. Genetic variants (ALDH2*2 allele) affect acetaldehyde metabolism. 
+                    This model assumes instantaneous absorption and perfect mixing - reality is messier!
                 </p>
             `;
             
@@ -643,7 +625,7 @@
         }
         
         function generateChart(pattern) {
-            const { sessionStart, sessionEnd, soberBy, maxDrinks, drink, weight, widmarkR, metabolismRate } = chartData;
+            const { sessionStart, sessionEnd, soberBy, maxDrinks, drink, weight, widmarkR, metabolismRate, worstCaseMetabolismRate, bacPerDrink } = chartData;
             
             // Generate drinking schedule based on pattern
             let drinkTimes = [];
@@ -664,16 +646,20 @@
                 }
                 
                 const secondHalfDrinks = maxDrinks - firstHalfDrinks;
-                for (let i = 0; i < secondHalfDrinks; i++) {
-                    drinkTimes.push(new Date(sessionStart.getTime() + firstHalfDuration + (i * firstHalfDuration / secondHalfDrinks)));
+                if (secondHalfDrinks > 0) {
+                    for (let i = 0; i < secondHalfDrinks; i++) {
+                        drinkTimes.push(new Date(sessionStart.getTime() + firstHalfDuration + (i * firstHalfDuration / secondHalfDrinks)));
+                    }
                 }
             } else if (pattern === 'backload') {
                 // 40% in first half, 60% in second half
                 const firstHalfDrinks = Math.floor(maxDrinks * 0.4);
                 const firstHalfDuration = sessionDurationMs / 2;
                 
-                for (let i = 0; i < firstHalfDrinks; i++) {
-                    drinkTimes.push(new Date(sessionStart.getTime() + (i * firstHalfDuration / firstHalfDrinks)));
+                if (firstHalfDrinks > 0) {
+                    for (let i = 0; i < firstHalfDrinks; i++) {
+                        drinkTimes.push(new Date(sessionStart.getTime() + (i * firstHalfDuration / firstHalfDrinks)));
+                    }
                 }
                 
                 const secondHalfDrinks = maxDrinks - firstHalfDrinks;
@@ -682,34 +668,48 @@
                 }
             }
             
-            // Calculate BAC over time
+            // Calculate BAC over time with proper physics
             const dataPoints = [];
             const startTime = sessionStart.getTime();
             const endTime = soberBy.getTime();
-            const timeStep = 15 * 60 * 1000; // 15 minutes
+            const timeStep = 10 * 60 * 1000; // 10 minutes for smooth curve
             
             for (let time = startTime; time <= endTime; time += timeStep) {
                 const currentTime = new Date(time);
-                let bac = 0;
+                let bacNominal = 0;
+                let bacWorstCase = 0;
+                let bacBestCase = 0;
                 
-                // Add contribution from each drink consumed so far
+                // For each drink consumed so far, calculate its contribution to current BAC
                 drinkTimes.forEach(drinkTime => {
                     if (drinkTime <= currentTime) {
                         const hoursElapsed = (currentTime - drinkTime) / (1000 * 60 * 60);
-                        const alcoholGrams = drink.gramsPerServing;
-                        const peakBAC = (alcoholGrams / (weight * 1000 * widmarkR)) * 100;
-                        const currentBAC = Math.max(0, peakBAC - (hoursElapsed * metabolismRate));
-                        bac += currentBAC;
+                        
+                        // Nominal case
+                        const bacFromThisDrink = Math.max(0, bacPerDrink - (hoursElapsed * metabolismRate));
+                        bacNominal += bacFromThisDrink;
+                        
+                        // Worst case (slower metabolism)
+                        const bacWorst = Math.max(0, bacPerDrink - (hoursElapsed * worstCaseMetabolismRate));
+                        bacWorstCase += bacWorst;
+                        
+                        // Best case (faster metabolism)
+                        const bacBest = Math.max(0, bacPerDrink - (hoursElapsed * metabolismRate * 1.2));
+                        bacBestCase += bacBest;
                     }
                 });
                 
                 dataPoints.push({
                     time: currentTime,
-                    bac: bac,
-                    bacUpper: bac * 1.2, // Upper error bar
-                    bacLower: Math.max(0, bac * 0.8) // Lower error bar
+                    bac: bacNominal,
+                    bacUpper: bacWorstCase,
+                    bacLower: bacBestCase
                 });
             }
+            
+            // Find peak BAC
+            const peakBAC = Math.max(...dataPoints.map(d => d.bac));
+            const peakBACWorst = Math.max(...dataPoints.map(d => d.bacUpper));
             
             // Create chart
             const ctx = document.getElementById('bacChart');
@@ -718,39 +718,48 @@
                 currentChart.destroy();
             }
             
+            const labels = dataPoints.map(d => {
+                const hours = d.time.getHours();
+                const mins = d.time.getMinutes();
+                return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
+            });
+            
             currentChart = new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: dataPoints.map(d => d.time.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })),
+                    labels: labels,
                     datasets: [
                         {
-                            label: 'Estimated BAC',
+                            label: 'Expected BAC',
                             data: dataPoints.map(d => d.bac),
                             borderColor: '#667eea',
                             backgroundColor: 'rgba(102, 126, 234, 0.1)',
                             borderWidth: 3,
                             fill: true,
-                            tension: 0.4
+                            tension: 0.4,
+                            pointRadius: 0
                         },
                         {
-                            label: 'Upper Range (+20%)',
+                            label: 'Worst Case (Slow Metabolism)',
                             data: dataPoints.map(d => d.bacUpper),
                             borderColor: '#f5576c',
                             backgroundColor: 'rgba(245, 87, 108, 0.05)',
                             borderWidth: 2,
                             borderDash: [5, 5],
                             fill: false,
-                            tension: 0.4
+                            tension: 0.4,
+                            pointRadius: 0
                         },
                         {
-                            label: 'Lower Range (-20%)',
+                            label: 'Best Case (Fast Metabolism)',
                             data: dataPoints.map(d => d.bacLower),
                             borderColor: '#4ecdc4',
                             backgroundColor: 'rgba(78, 205, 196, 0.05)',
                             borderWidth: 2,
                             borderDash: [5, 5],
                             fill: false,
-                            tension: 0.4
+                            tension: 0.4,
+                            pointRadius: 0
                         }
                     ]
                 },
@@ -767,7 +776,47 @@
                             intersect: false,
                             callbacks: {
                                 label: function(context) {
-                                    return context.dataset.label + ': ' + context.parsed.y.toFixed(3) + '% BAC';
+                                    return context.dataset.label + ': ' + context.parsed.y.toFixed(4) + '% BAC';
+                                }
+                            }
+                        },
+                        annotation: {
+                            annotations: {
+                                sessionEnd: {
+                                    type: 'line',
+                                    xMin: labels.findIndex(l => {
+                                        const [h, m] = l.split(':').map(Number);
+                                        const labelTime = new Date(sessionStart);
+                                        labelTime.setHours(h, m, 0, 0);
+                                        return Math.abs(labelTime - sessionEnd) < 15 * 60 * 1000;
+                                    }),
+                                    xMax: labels.findIndex(l => {
+                                        const [h, m] = l.split(':').map(Number);
+                                        const labelTime = new Date(sessionStart);
+                                        labelTime.setHours(h, m, 0, 0);
+                                        return Math.abs(labelTime - sessionEnd) < 15 * 60 * 1000;
+                                    }),
+                                    borderColor: 'orange',
+                                    borderWidth: 2,
+                                    borderDash: [10, 5],
+                                    label: {
+                                        display: true,
+                                        content: 'Session Ends',
+                                        position: 'start'
+                                    }
+                                },
+                                legalLimit: {
+                                    type: 'line',
+                                    yMin: 0.08,
+                                    yMax: 0.08,
+                                    borderColor: 'red',
+                                    borderWidth: 2,
+                                    borderDash: [10, 5],
+                                    label: {
+                                        display: true,
+                                        content: 'UK Legal Limit (0.08%)',
+                                        position: 'end'
+                                    }
                                 }
                             }
                         }
@@ -777,7 +826,11 @@
                             beginAtZero: true,
                             title: {
                                 display: true,
-                                text: 'Blood Alcohol Content (%)'
+                                text: 'Blood Alcohol Content (%)',
+                                font: {
+                                    size: 14,
+                                    weight: 'bold'
+                                }
                             },
                             ticks: {
                                 callback: function(value) {
@@ -788,31 +841,19 @@
                         x: {
                             title: {
                                 display: true,
-                                text: 'Time'
+                                text: 'Time',
+                                font: {
+                                    size: 14,
+                                    weight: 'bold'
+                                }
                             },
                             ticks: {
                                 maxRotation: 45,
-                                minRotation: 45
+                                minRotation: 45,
+                                autoSkip: true,
+                                maxTicksLimit: 20
                             }
                         }
-                    },
-                    annotation: {
-                        annotations: [
-                            {
-                                type: 'line',
-                                mode: 'horizontal',
-                                scaleID: 'y',
-                                value: 0.08,
-                                borderColor: 'red',
-                                borderWidth: 2,
-                                borderDash: [10, 5],
-                                label: {
-                                    content: 'UK Legal Limit (0.08%)',
-                                    enabled: true,
-                                    position: 'end'
-                                }
-                            }
-                        ]
                     }
                 }
             });
