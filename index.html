@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🍺 The Pub Session Planner</title>
+    <title>🍺 Alcohol Metabolism Calculator - BAC Science Tool</title>
     
     <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -311,12 +311,12 @@
 <body>
     <div class="container">
         <header>
-            <h1>🍺 The Sensible Pub Session Planner</h1>
-            <p>Plan your night out with science! Calculate safe drinking limits based on metabolism.</p>
+            <h1>🍺 The Sensible Session Planner</h1>
+            <p>Understand alcohol metabolism with science! Calculate BAC timelines based on real pharmacokinetics.</p>
         </header>
         
         <div class="warning-banner">
-            ⚠️ <strong>Important:</strong> This calculator uses scientific estimates but individual metabolism varies. Always drink responsibly, never drink and drive, and know your limits!
+            ⚠️ <strong>Educational Tool:</strong> This calculator demonstrates pharmacokinetic principles of alcohol metabolism using the Widmark equation and standard elimination rates. Individual variation is significant - use for learning, not as personal medical advice!
         </div>
         
         <div class="content">
@@ -416,7 +416,12 @@
             </div>
             
             <div class="disclaimer">
-                <strong>Legal Disclaimer:</strong> This tool is for educational and entertainment purposes only. It provides estimates based on average metabolic rates and should not be used as medical advice or as a definitive guide for safe drinking. Alcohol affects everyone differently. The UK drink-drive limit is 80mg/100ml blood (0.08% BAC) in England/Wales. Never rely solely on calculations - if in doubt, don't drive. Please drink responsibly.
+                <strong>Educational Note:</strong> This tool demonstrates alcohol pharmacokinetics using established scientific models. 
+                It assumes absorption is complete and instantaneous (reality: 30-90 minutes), uniform distribution (reality: varies by tissue), 
+                and zero-order elimination kinetics (mostly accurate for low-moderate BAC). Real-world factors include: gastric emptying time, 
+                food content, genetic polymorphisms in ADH/ALDH enzymes, hepatic function, body composition, and chronopharmacological effects. 
+                This is a teaching tool - consult medical literature for clinical applications. The Widmark formula dates to 1932 but remains 
+                the forensic standard for BAC estimation worldwide.
             </div>
         </div>
     </div>
@@ -468,7 +473,6 @@
             // Constants
             const widmarkR = sex === 'male' ? 0.68 : 0.55; // Body water constant
             const metabolismRate = 0.015; // BAC reduction per hour (standard rate)
-            const safetyMargin = 0.8; // Conservative 20% safety margin
             
             // Drink specifications (grams of alcohol per serving)
             const drinks = {
@@ -479,18 +483,68 @@
             
             const drink = drinks[drinkType];
             
-            // Calculate session duration and metabolism time
+            // Calculate session duration and total time until sober
             const sessionDurationHours = (sessionEnd - sessionStart) / (1000 * 60 * 60);
+            const totalTimeToSober = (soberBy - sessionStart) / (1000 * 60 * 60);
             const metabolismTimeHours = (soberBy - sessionEnd) / (1000 * 60 * 60);
             
-            // Calculate max drinks
-            // BAC formula: (alcohol in grams / (weight in grams * r)) * 100
-            // We need to be at 0 BAC by soberBy
-            const maxBAC = metabolismTimeHours * metabolismRate; // Max BAC we can reach
-            const maxAlcoholGrams = (maxBAC / 100) * (weight * 1000 * widmarkR) * safetyMargin;
-            const maxDrinks = Math.floor(maxAlcoholGrams / drink.gramsPerServing);
+            /*
+             * SCIENTIFIC CALCULATION - Working backwards from sober time
+             * 
+             * We need to find the maximum number of drinks such that:
+             * 1. All drinks are consumed during the session (between start and end)
+             * 2. BAC reaches exactly 0% at the sober-by time (including upper error margin)
+             * 
+             * The critical insight: The LAST drink consumed will take the longest to metabolize.
+             * If we drink at sessionEnd, we need metabolismTimeHours to fully metabolize.
+             * 
+             * For worst-case (upper error margin = 20% slower metabolism):
+             * - Effective metabolism rate = 0.015 / 1.2 = 0.0125% per hour
+             * 
+             * Algorithm:
+             * 1. Calculate BAC per drink: BAC_per_drink = (grams / (weight_kg * 1000 * r)) * 100
+             * 2. Find max drinks where last drink at sessionEnd reaches 0 BAC by soberBy
+             * 3. Each drink contributes to total BAC, but older drinks have more time to metabolize
+             */
             
-            // Calculate drinking patterns
+            // BAC per drink (peak BAC immediately after consumption)
+            const bacPerDrink = (drink.gramsPerServing / (weight * 1000 * widmarkR)) * 100;
+            
+            // Worst case metabolism rate (20% slower for upper error bound)
+            const worstCaseMetabolismRate = metabolismRate / 1.2;
+            
+            // Binary search for maximum drinks
+            let maxDrinks = 0;
+            
+            // Try different numbers of drinks and simulate BAC at sober time
+            for (let numDrinks = 1; numDrinks <= 50; numDrinks++) {
+                // Simulate evenly spaced drinking (steady pace)
+                let bacAtSoberTime = 0;
+                
+                for (let i = 0; i < numDrinks; i++) {
+                    // When is this drink consumed?
+                    const drinkTime = sessionStart.getTime() + (i * (sessionEnd - sessionStart) / numDrinks);
+                    const drinkTimeDate = new Date(drinkTime);
+                    
+                    // How much time to metabolize from drink time to sober time?
+                    const hoursToMetabolize = (soberBy - drinkTimeDate) / (1000 * 60 * 60);
+                    
+                    // BAC from this drink at sober time (worst case)
+                    const remainingBAC = Math.max(0, bacPerDrink - (hoursToMetabolize * worstCaseMetabolismRate));
+                    
+                    bacAtSoberTime += remainingBAC;
+                }
+                
+                // If we're still sober (BAC ~= 0) at the target time, this is safe
+                if (bacAtSoberTime < 0.001) { // Effectively zero
+                    maxDrinks = numDrinks;
+                } else {
+                    // We've exceeded safe limits
+                    break;
+                }
+            }
+            
+            // Store calculation data
             chartData = {
                 sessionStart,
                 sessionEnd,
@@ -500,8 +554,11 @@
                 weight,
                 widmarkR,
                 metabolismRate,
+                worstCaseMetabolismRate,
                 sessionDurationHours,
-                metabolismTimeHours
+                metabolismTimeHours,
+                totalTimeToSober,
+                bacPerDrink
             };
             
             // Display results
@@ -541,21 +598,44 @@
             
             const scienceHTML = `
                 <p style="margin-bottom: 15px;">
-                    <strong>Widmark Formula:</strong> This calculator uses the Widmark formula to estimate Blood Alcohol Content (BAC). 
-                    Your body water percentage (${chartData.widmarkR}) varies by sex due to physiological differences.
+                    <strong>🧪 The Widmark Formula:</strong> BAC = (A / (W × r)) × 100, where:<br>
+                    • A = grams of pure alcohol consumed<br>
+                    • W = body weight in grams (you: ${weight * 1000}g)<br>
+                    • r = body water distribution ratio (you: ${chartData.widmarkR})<br>
+                    • Each ${chartData.drink.name} = ${chartData.drink.gramsPerServing.toFixed(1)}g alcohol
                 </p>
                 <p style="margin-bottom: 15px;">
-                    <strong>Metabolism Rate:</strong> The average person metabolizes alcohol at approximately ${chartData.metabolismRate * 100}% BAC per hour. 
-                    This equals roughly one standard drink per hour, but varies significantly between individuals.
+                    <strong>⏱️ Metabolism Rate:</strong> Alcohol is metabolized at approximately ${chartData.metabolismRate * 100}% BAC per hour 
+                    via hepatic alcohol dehydrogenase. This is relatively constant and cannot be accelerated by coffee, cold showers, or exercise. 
+                    One standard drink (~10g alcohol) takes about 1 hour to metabolize.
                 </p>
                 <p style="margin-bottom: 15px;">
-                    <strong>Safety Margin:</strong> We've applied a 20% safety reduction to account for individual variation, 
-                    slower metabolism, and other factors. The actual safe amount may be lower depending on food intake, 
-                    hydration, medications, and personal health.
+                    <strong>🔬 Calculation Method:</strong> This tool works <em>backwards</em> from your sober time. 
+                    For each drink consumed at time T, we calculate when it will be fully metabolized. The constraint is that 
+                    ALL drinks must be metabolized by your target time. We account for the worst-case scenario (20% slower metabolism) 
+                    to ensure safety even with individual variation.
+                </p>
+                <p style="margin-bottom: 15px;">
+                    <strong>📊 Per Drink BAC:</strong> Each ${chartData.drink.name} produces approximately ${chartData.bacPerDrink.toFixed(4)}% BAC 
+                    in your body (peak level). This takes ${(chartData.bacPerDrink / chartData.metabolismRate).toFixed(1)} hours to fully metabolize 
+                    (${(chartData.bacPerDrink / chartData.worstCaseMetabolismRate).toFixed(1)} hours worst-case).
+                </p>
+                <p style="margin-bottom: 15px;">
+                    <strong>⚡ Key Variables:</strong>
+                    • Session duration: ${chartData.sessionDurationHours.toFixed(2)} hours<br>
+                    • Recovery time: ${chartData.metabolismTimeHours.toFixed(2)} hours<br>
+                    • Total time: ${chartData.totalTimeToSober.toFixed(2)} hours<br>
+                    • Max safe drinks: ${chartData.maxDrinks} × ${chartData.drink.name}s
+                </p>
+                <p style="margin-bottom: 15px;">
+                    <strong>🎯 Why Different Patterns Matter:</strong> The timing of consumption dramatically affects metabolism. 
+                    Drinks consumed early have more time to metabolize. Frontloading (heavy start) means your last drinks have maximum 
+                    metabolism time. Backloading (slow start) means your final drinks have minimal time to clear before your deadline.
                 </p>
                 <p>
-                    <strong>One ${chartData.drink.name}:</strong> Contains approximately ${chartData.drink.gramsPerServing.toFixed(1)}g 
-                    of pure alcohol (${chartData.drink.volume}ml at ${(chartData.drink.abv * 100).toFixed(1)}% ABV).
+                    <strong>⚠️ Real-World Factors:</strong> Food (especially fats/proteins) slows absorption by 30-50%. 
+                    Hydration, medications, liver health, and genetics all affect metabolism. Asian populations often have 
+                    less efficient aldehyde dehydrogenase (ALDH2 deficiency). This calculator assumes optimal conditions!
                 </p>
             `;
             
